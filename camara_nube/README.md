@@ -1,3 +1,86 @@
+# Proyecto final: cámara, imagen y nube
+
+Alejandra Sosa Dias · Diseño de IoT y Sistemas Embebidos · UCU · 2026.
+
+La entrega amplía el ejemplo de clase con fotos por movimiento, temporizador de 120 s, tiempo muerto de 5 s, metadatos, telemetría y avisos MQTT, panel web y mediciones de latencia. Las fotos se suben por HTTPS a Apps Script, Drive y Sheets; MQTT transporta lecturas y avisos, no imágenes.
+
+## Ejecutar en el equipo del docente
+
+Esta guía corresponde a la entrega actual. Las secciones posteriores conservan explicaciones del ejemplo base; para instalación, configuración y mediciones seguir estos pasos.
+
+### Requisitos y montaje
+
+Se probó con ESP-IDF 6.0.2, objetivo `esp32s2`, Kaluga-1 V1.2, OV2640, pantalla ST7789 y 2 MB de PSRAM. Usar una red WiFi de 2,4 GHz con Internet. Se necesita salida a HTTPS, MQTT y SNTP (`pool.ntp.org`).
+
+Montaje usado: sin placa de audio, sin jumper RGB y con placa táctil desconectada; SW3 y SW4 en ON, JTAG e interruptores LCD32 en OFF. En la V1.2 se flashea sin cámara; cortar la alimentación antes de retirarla o montarla.
+
+### Configuración propia
+
+Desde una terminal con ESP-IDF activado, situarse en `camara_nube`. Si todavía no existe el archivo local, crearlo:
+
+```powershell
+Copy-Item main/config_local.h.example main/config_local.h
+```
+
+Completar `WIFI_SSID`, `WIFI_CLAVE`, `NUBE_URL` y `NUBE_TOKEN` en **`main/config_local.h`**. No publicar ese archivo. La URL debe terminar en `/exec` y el token debe corresponder a esa implementación.
+
+En `main/camara_nube_main.c` se eligen la seguridad WiFi (WPA2 por defecto), el kit y la pantalla. Si usa otra placa, revisar esas opciones. El detector activo requiere VGA. El período actual es 120 s y los informes salen cada 10 s.
+
+No copiar las rutas de instalación ni el puerto COM de la autora. En VS Code seleccionar la instalación local de ESP-IDF y el puerto de la placa desde la extensión. Si el sistema no reconoce el adaptador USB serie, instalar su controlador.
+
+### Apps Script y acceso a Drive
+
+Para usar una nube propia, copiar `apps_script/Codigo.gs` y `appsscript.json` a un proyecto de Apps Script, ejecutar `configurar()` y autorizar Drive y Sheets. El registro entrega el token y los enlaces. Ejecutar `probar()` y publicar como aplicación web: ejecutar como propietario, acceso «Cualquier usuario». Usar la URL `/exec` y el token en el archivo local de la placa. Ver los pasos detallados en [apps_script/README.md](../apps_script/README.md).
+
+Si ya existe una implementación, actualizarla desde «Gestionar implementaciones» publicando una nueva versión. Guardar el código no actualiza por sí solo la versión de `/exec`. La versión actual incluye tiempos de captura, confirmación de fila y consulta de reloj para el panel.
+
+Si el docente usa la nube de la entrega, necesita URL y token por un canal privado. Para ver los archivos existentes, compartir con su cuenta la carpeta y la hoja como lector. La URL del script y los avisos MQTT no conceden permiso para ver imágenes privadas.
+
+### Compilar y cargar
+
+En una copia nueva, desde `camara_nube`:
+
+```powershell
+idf.py set-target esp32s2
+idf.py build
+```
+
+ESP-IDF descarga las dependencias de `main/idf_component.yml` en la primera compilación. Usar `sdkconfig.defaults`, que configura flash, PSRAM y TLS, incluida la verificación de raíces cruzadas necesaria para Google.
+
+Con la cámara retirada sin alimentación, conectar la placa y cargar. **Sustituir `COM11` por el puerto del equipo** (o el dispositivo serie correspondiente en Linux/macOS):
+
+```powershell
+idf.py -p COM11 -b 115200 flash
+```
+
+Cortar alimentación, montar la cámara y encender. Abrir el monitor:
+
+```powershell
+idf.py -p COM11 monitor
+```
+
+Comprobar WiFi, el ID `kaluga-...`, `[hora] sincronizada por SNTP` y `MQTT SI`. Pulsar BOOT: debe guardarse la foto en Drive y aparecer una fila en Sheets. Salir del monitor con Ctrl+]. Si falla la comunicación serie, cerrar otros monitores y revisar puerto y cable.
+
+### Panel y mediciones
+
+Abrir [panel_web/index.html](../panel_web/index.html) en el navegador con Internet, sin `?demo=1`. No requiere Node ni compilación. Seleccionar HiveMQ, raíz `ucu-camara-2026-sosadias` y **el ID que imprime la placa del docente**. El valor inicial `kaluga-00907c` es el de la placa de la entrega; otra placa tiene otro ID. Pulsar Conectar y esperar «Conectado y suscrito».
+
+El broker y la raíz deben coincidir con el firmware. Por defecto, la placa usa `mqtts://broker.hivemq.com:8883` y el navegador `wss://broker.hivemq.com:8884/mqtt`; son transportes del mismo servidor. No se necesitan credenciales MQTT para el broker público incluido. Si se cambia de broker, actualizar ambos extremos según [panel_web/README.md](../panel_web/README.md).
+
+Mantener el panel conectado antes de sacar fotos: los mensajes no son retenidos. Deben llegar RSSI y temperatura cada diez segundos y avisos tras cada subida confirmada. Para ver imágenes, iniciar sesión en Google con una cuenta con acceso; si falla la vista integrada, usar «Abrir en Drive». El token de Apps Script se configura en la placa, no en el panel.
+
+Para medir diez fotos, esperar SNTP, pegar la URL `/exec` en el panel y pulsar Preparar medición. Desde «Lista» se incluyen las primeras diez capturas nuevas válidas. Descargar los datos antes de recargar, reconectar manualmente o preparar otra muestra. El JSON conserva medidas, medias, máximas y ajuste de reloj. El modo demo no valida la placa.
+
+La placa sincroniza su reloj mediante SNTP; el script usa estimación por edad cuando no hay marca de captura válida. Las latencias entre equipos requieren reloj válido. Captura a panel mide recepción del aviso, no descarga de la imagen. La CPU corresponde a la ventana entre informes; los mínimos de memoria son desde el arranque.
+
+### Validación de la entrega
+
+Se probaron los tres disparadores, Drive, Sheets y el panel en hardware. Se completaron diez muestras reales de latencia, cinco movimientos válidos detectados, CPU/memoria con subida y MQTT simultáneos y cuatro intervalos periódicos calculados de cinco filas de Sheets. Los resultados y limitaciones figuran en el informe.
+
+## Documentación del ejemplo base
+
+Las secciones siguientes describen el punto de partida del curso. Sus configuraciones y estados históricos no sustituyen la guía actual de esta entrega.
+
 | Supported Targets | ESP32-S2 |
 | ----------------- | -------- |
 
@@ -144,7 +227,7 @@ camara_nube/
 ## Cómo compilar, flashear y probar
 
 1. Instala el Apps Script y comprueba que `probar()` deja una foto en tu Drive ([`../apps_script/README.md`](../apps_script/README.md)).
-2. Escribe la red, la URL y el token en el `.c`.
+2. Copia la plantilla y escribe la red, URL y token en `main/config_local.h`, como indica la gu?a de esta entrega.
 3. Compila y flashea **sin la cámara** (kit v1.2), apaga, encaja la cámara y enciende.
 4. Espera `RED` en la barra, pulsa **BOOT** y mira: `FOTO 1 EN COLA`, luego `SUBIENDO`, luego `OK ... S`.
 5. Abre la carpeta **Kaluga - fotos** en Google Drive y la hoja **Kaluga - registro de fotos**.

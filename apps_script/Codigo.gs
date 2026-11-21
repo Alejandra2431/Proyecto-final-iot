@@ -25,7 +25,7 @@
  * token. Por eso el token no se publica ni se sube a ningún repositorio.
  */
 
-const VERSION = 'proyecto-1.1-metadatos';
+const VERSION = 'proyecto-1.2-mediciones';
 
 /* Una foto UXGA con calidad alta ronda los 300 KB. 2 MB es un tope contra
  * abusos, no contra fotos normales. */
@@ -42,7 +42,9 @@ const NOMBRE_CARPETA = 'Kaluga - fotos';
 const NOMBRE_HOJA = 'Kaluga - registro de fotos';
 const ENCABEZADO = ['Captura', 'Recibida', 'Dispositivo', 'Foto n.º', 'Archivo',
                     'Bytes', 'Resolución', 'Espera en la placa (s)', 'Enlace',
-                    'Motivo', 'RSSI (dBm)', 'Temperatura chip (°C)'];
+                    'Motivo', 'RSSI (dBm)', 'Temperatura chip (°C)',
+                    'Arranque', 'Captura epoch (ms)', 'Fila confirmada epoch (ms)',
+                    'Captura a fila (ms)', 'Reloj de captura'];
 
 /* ======================================================================= */
 /*  Instalación: se ejecutan a mano desde el editor                         */
@@ -123,7 +125,16 @@ const JPEG_DE_PRUEBA =
 
 /** Abrir la URL /exec en el navegador: comprueba que la implementación
  *  responde. No enseña nada que no sea público. */
-function doGet() {
+function doGet(e) {
+  // Solo devuelve la hora pública: no expone fotos, claves ni configuración.
+  // JSONP permite consultar el reloj desde el panel local sin depender de CORS.
+  const callback = e && e.parameter && e.parameter.callback;
+  if (e && e.parameter && e.parameter.reloj === '1' &&
+      typeof callback === 'string' && /^camaraHora_[a-z0-9]+$/.test(callback)) {
+    return ContentService.createTextOutput(callback + '(' +
+      JSON.stringify({ servidor_epoch_ms: Date.now() }) + ');')
+      .setMimeType(ContentService.MimeType.JAVASCRIPT);
+  }
   return responder({ ok: true, servicio: 'kaluga-fotos', version: VERSION });
 }
 
@@ -188,6 +199,10 @@ function recibir(e) {
   if (metadatos === null) {
     return { ok: false, error: 'formato' };
   }
+  if (d.captura_epoch_ms !== undefined && d.captura_epoch_ms !== 0 &&
+      entero(d.captura_epoch_ms, 1577836800000, 4102444800000) === null) {
+    return { ok: false, error: 'formato' };
+  }
 
   // 2. ¿Ya se guardó? Si la respuesta se perdió por el camino, la placa
   //    reintenta la MISMA foto: sin esto, quedaría dos veces en Drive. Es el
@@ -243,7 +258,8 @@ function guardar(d, dispositivo, arranque, numero, edadMs, ancho, alto, props, m
   // La hora de captura la pone la nube, con su reloj: ahora menos lo que la
   // foto esperó en la placa. La placa no necesita saber la hora.
   const ahora = new Date();
-  const captura = new Date(ahora.getTime() - edadMs);
+  const capturaEpoch = d.captura_epoch_ms || 0;
+  const captura = new Date(capturaEpoch || ahora.getTime() - edadMs);
   const zona = Session.getScriptTimeZone();
   const nombre = dispositivo + '_' +
                  Utilities.formatDate(captura, zona, 'yyyy-MM-dd_HH-mm-ss') +
@@ -263,9 +279,18 @@ function guardar(d, dispositivo, arranque, numero, edadMs, ancho, alto, props, m
   // 5. La hoja. appendRow() es atómica: varias placas a la vez no se pisan.
   hoja.appendRow([captura, ahora, dispositivo, numero, nombre, n,
                   ancho + 'x' + alto, Math.round(edadMs / 1000), archivo.getUrl(),
-                  metadatos.motivo, metadatos.rssi, metadatos.temperatura]);
+                  metadatos.motivo, metadatos.rssi, metadatos.temperatura,
+                  arranque, capturaEpoch || '', '', '', capturaEpoch ? 'SNTP' : 'estimado por edad']);
 
-  const resultado = { ok: true, nombre: nombre, id: archivo.getId(), bytes: n };
+  // Medimos cuando Google confirma la primera escritura, no el final del GET.
+  SpreadsheetApp.flush();
+  const filaEpoch = Date.now();
+  const demoraFila = capturaEpoch ? filaEpoch - capturaEpoch : '';
+  hoja.getRange(hoja.getLastRow(), 15, 1, 2).setValues([[filaEpoch, demoraFila]]);
+  SpreadsheetApp.flush();
+
+  const resultado = { ok: true, nombre: nombre, id: archivo.getId(), bytes: n,
+                      fila_epoch_ms: filaEpoch };
   cache.put(clave, JSON.stringify(resultado), RECUERDO_S);
   return resultado;
 }
@@ -305,7 +330,7 @@ function completarEncabezado(hoja) {
     }
   }
   if (actual.slice(9).some((valor, i) => valor !== ENCABEZADO[i + 9])) {
-    hoja.getRange(1, 10, 1, 3).setValues([ENCABEZADO.slice(9)]);
+    hoja.getRange(1, 10, 1, ENCABEZADO.length - 9).setValues([ENCABEZADO.slice(9)]);
   }
 }
 

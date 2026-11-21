@@ -30,7 +30,32 @@ TLS cifra cada conexión, pero el broker es público: no autentica a la placa ni
 
 ## Tiempos y pruebas
 
-“Edad al encolar MQTT” es el tiempo que pasó en la placa desde la captura hasta preparar el aviso. No incluye necesariamente el envío posterior ni la recepción o visualización en el navegador. La confirmación QoS 1 del broker tampoco confirma que el panel haya recibido el mensaje. El JSON exportado incluye la hora de recepción del navegador; falta completar el protocolo de medición de latencias del informe.
+“Edad al encolar MQTT” es el tiempo que pasó en la placa desde la captura hasta preparar el aviso. No incluye necesariamente el envío posterior ni la recepción o visualización en el navegador. La confirmación QoS 1 del broker tampoco confirma que el panel haya recibido el mensaje.
+
+## Sesión final de medición
+
+Actualizar primero la versión existente del Apps Script y flashear la nueva versión del firmware sin cámara. La placa sincroniza su reloj por SNTP al obtener IP y anuncia `[hora] sincronizada por SNTP`. Las fotos anteriores a ese aviso no tienen hora sincronizada y no sirven para las latencias entre equipos.
+
+En el panel conectado, pegar la URL /exec en el campo correspondiente y pulsar **Preparar medición**. Se hacen tres consultas de hora pública al mismo script, sin token ni acceso a archivos. Se elige la de menor ida y vuelta y se calcula el desfase del navegador respecto de Google con el punto medio. Se indica un margen de la mitad de esa ida y vuelta; no incluye el error de SNTP ni una eventual diferencia de relojes entre servidores de Google. Si cambia el reloj del equipo durante la muestra, hay que prepararla de nuevo.
+
+Desde que indica **Lista**, la tabla toma los primeros diez avisos válidos de fotos capturadas después de esa preparación. Pueden ser de cualquier motivo. Las fotos previas o sin datos de reloj/fila no cuentan. Con diez fotos, la muestra se congela aunque sigan llegando otras. No recargar, reconectar con el botón Conectar ni volver a preparar antes de exportar: esas acciones reinician la muestra. Una reconexión automática del cliente conserva los datos.
+
+Las medidas son:
+
+- **Subida:** desde el primer intento HTTPS hasta recibir la confirmación final en la placa; incluye reintentos y esperas posteriores al primer intento. No incluye el tiempo previo en la cola.
+- **Captura a fila:** hora en Google después del primer `SpreadsheetApp.flush()` de la fila menos hora SNTP de captura. Mide confirmación de escritura, no el instante en que alguien ve la fila en el navegador. Luego se escriben las celdas de medición y se confirma otra vez.
+- **Captura a respuesta:** intervalo monotónico de la placa; incluye cola, subida y lectura del resultado HTTPS. Es distinto de captura a fila.
+- **Captura a panel estimada:** recepción del aviso MQTT en el navegador, corregida con el desfase del reloj, menos captura SNTP. No mide la descarga o representación de la foto.
+
+El JSON de **Descargar datos de la sesión** conserva los diez registros, medias y máximas, y las muestras usadas para comparar relojes. No se ejecuta una medición válida usando el modo demo.
+
+En Sheets se agregan Arranque, Captura epoch (ms), Fila confirmada epoch (ms), Captura a fila (ms) y Reloj de captura. Las filas anteriores se conservan. Para intervalos periódicos, comparar capturas del mismo arranque en la hoja, preferentemente usando epoch en milisegundos. Un período descartado por tiempo muerto puede causar un intervalo múltiplo de 120 s; se debe explicar con el registro del monitor.
+
+Durante esta sesión el firmware informa cada diez segundos para capturar ventanas con HTTPS y MQTT simultáneos. En el monitor, Ctrl+T seguido de Ctrl+L activa o desactiva la escritura de un archivo `log.camara_nube.FECHA.txt`; verificar el mensaje de confirmación. Estos registros quedan excluidos de Git. Conservar el registro completo de la sesión y el JSON para analizar los casos de conexión y los mínimos de memoria.
+
+Prueba de movimientos omitidos en la misma sesión: realizar diez entradas amplias de mano a la escena, sostenerla dos segundos y retirarla. Esperar al menos diez segundos entre intentos y asegurarse de que la foto fija anterior terminó y pasaron cinco segundos desde cualquier captura. Anotar cuántas entradas produjeron un disparo aceptado. Si coincide una periódica durante el tiempo muerto, marcar el intento como interferido y repetirlo; no contarlo como fallo del detector. La retirada también es un cambio de escena y puede producir otra foto, que no debe confundirse con la detección de entrada.
+
+Las pruebas locales preparadas (opcionales) se ejecutan desde la raíz:
 
 Desde la raíz del repositorio, las pruebas locales del panel se ejecutan con:
 

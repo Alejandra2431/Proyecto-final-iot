@@ -27,6 +27,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/queue.h"
@@ -43,6 +44,7 @@
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
+#include "esp_netif_sntp.h"
 #include "camara.h"
 #include "avisos_mqtt.h"
 #include "imagen.h"
@@ -184,7 +186,9 @@
 #define ESPERA_MAX_MS       60000
 #define INTENTOS_SERVIDOR   5       /* errores del servidor, por foto        */
 
-#define INFORME_PERIODO_MS  30000
+/* Ventanas cortas para observar CPU y memoria durante una subida. */
+#define INFORME_PERIODO_MS  10000
+#define EV_HORA_OK         BIT1
 
 #define AVISO_BOTON         (1u << 0)
 #define AVISO_PERIODICA     (1u << 1)
@@ -207,6 +211,7 @@ typedef struct {
     uint8_t *jpeg;
     size_t   largo;
     int64_t  captura_us;
+    int64_t  captura_epoch_ms;
     uint32_t numero;
     uint16_t ancho;
     uint16_t alto;
@@ -394,6 +399,16 @@ static void leer_mediciones(nube_metadatos_t *datos)
     xSemaphoreGive(s_mutex_mediciones);
 }
 
+static int64_t hora_de_captura_ms(int64_t captura_us)
+{
+    if (!(xEventGroupGetBits(s_eventos) & EV_HORA_OK)) return 0;
+    struct timeval ahora;
+    gettimeofday(&ahora, NULL);
+    /* El cuadro ya tiene marca monotónica. La llevamos al reloj sincronizado. */
+    return (int64_t)ahora.tv_sec * 1000 + ahora.tv_usec / 1000 -
+        (esp_timer_get_time() - captura_us) / 1000;
+}
+
 static void tomar_foto(uint32_t pulsacion_ms, const char *motivo)
 {
 
@@ -428,6 +443,7 @@ static void tomar_foto(uint32_t pulsacion_ms, const char *motivo)
 
     /* Leemos cerca de la captura y guardamos los valores con la foto.
      * No se vuelven a leer al subir: podría haber esperado sin WiFi. */
+    f.captura_epoch_ms = hora_de_captura_ms(f.captura_us);
     leer_mediciones(&f.metadatos);
     char rssi[16] = "sin dato";
     char temperatura[16] = "sin dato";
@@ -662,6 +678,8 @@ static void tarea_subida(void *arg)
         uint32_t espera_ms = ESPERA_MIN_MS;
         int errores_servidor = 0;
         bool terminada = false;
+        uint32_t intentos = 0;
+        int64_t inicio_subida_us = 0;
 
         xSemaphoreTake(s_mutex_estado, portMAX_DELAY);
         s_estado.en_mano = true;
@@ -682,11 +700,14 @@ static void tarea_subida(void *arg)
                 .alto = f.alto,
                 .numero = f.numero,
                 .metadatos = f.metadatos,
+                .captura_epoch_ms = f.captura_epoch_ms,
                 /* La «edad» de la Clase 6: la nube resta este número a su
                  * propia hora para saber cuándo se sacó la foto. */
                 .edad_ms = us_a_ms(esp_timer_get_time() - f.captura_us),
             };
             nube_informe_t inf;
+            if (inicio_subida_us == 0) inicio_subida_us = esp_timer_get_time();
+            intentos++;
             const nube_resultado_t r = nube_subir(&nf, &inf);
 
             char corto[24];
@@ -717,7 +738,17 @@ static void tarea_subida(void *arg)
                          f.numero, inf.nombre, inf.ms_envio, inf.ms_respuesta,
                          (unsigned)inf.bytes,
                          inf.repetida ? "; ya estaba de un intento anterior" : "");
-                avisos_mqtt_foto(&nf, &inf, f.captura_us);
+                const uint32_t captura_a_respuesta_ms =
+                    us_a_ms(esp_timer_get_time() - f.captura_us);
+                const uint32_t subida_total_ms =
+                    us_a_ms(esp_timer_get_time() - inicio_subida_us);
+                ESP_LOGI(TAG, "[medicion] arranque=%s foto=%" PRIu32 " motivo=%s"
+                    " subida_ms=%" PRIu32 " captura_a_respuesta_ms=%" PRIu32
+                    " intentos=%" PRIu32 " captura_epoch_ms=%" PRIi64 " fila_epoch_ms=%" PRIi64,
+                    s_arranque, f.numero, f.metadatos.motivo, subida_total_ms,
+                    captura_a_respuesta_ms, intentos, f.captura_epoch_ms, inf.fila_epoch_ms);
+                avisos_mqtt_foto(&nf, &inf, f.captura_us, subida_total_ms,
+                                 captura_a_respuesta_ms, intentos);
                 terminada = true;
             } else if (r == NUBE_RECHAZADA) {
                 ESP_LOGE(TAG, "[subida] foto %" PRIu32 " rechazada, se descarta: %s",
@@ -806,6 +837,7 @@ static void informe(TimerHandle_t timer)
     informe_visor();
     informe_tareas(TAG);
     informe_memoria(TAG);
+    ESP_LOGI(TAG, "[medicion] subida activa al tomar estado: %s", e.subiendo ? "SI" : "NO");
     avisos_mqtt_informe();
     ESP_LOGI(TAG, "  WiFi %s;  conexiones %" PRIu32 ", desconexiones %" PRIu32,
              w.conectada ? "SI" : "no", w.conexiones, w.desconexiones);
@@ -834,6 +866,17 @@ static void identidad(void)
     ESP_ERROR_CHECK(esp_read_mac(mac, ESP_MAC_WIFI_STA));
     snprintf(s_id, sizeof(s_id), "kaluga-%02x%02x%02x", mac[3], mac[4], mac[5]);
     snprintf(s_arranque, sizeof(s_arranque), "%08" PRIx32, esp_random());
+}
+
+static void al_sincronizar_hora(struct timeval *hora)
+{
+    xEventGroupSetBits(s_eventos, EV_HORA_OK);
+    ESP_LOGI(TAG, "[hora] sincronizada por SNTP; listo para medir latencias");
+}
+
+static void al_obtener_ip(void *arg, esp_event_base_t base, int32_t id, void *datos)
+{
+    esp_netif_sntp_start();
 }
 
 void app_main(void)
@@ -904,6 +947,13 @@ void app_main(void)
         .seguridad = WIFI_SEGURIDAD,
     };
     ESP_ERROR_CHECK(red_wifi_iniciar(&red, s_eventos));
+    esp_sntp_config_t reloj = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+    reloj.start = false;
+    reloj.wait_for_sync = false;
+    reloj.sync_cb = al_sincronizar_hora;
+    ESP_ERROR_CHECK(esp_netif_sntp_init(&reloj));
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
+                                               al_obtener_ip, NULL));
     identidad();
     ESP_LOGI(TAG, "ID de esta placa: %s (arranque %s)", s_id, s_arranque);
 

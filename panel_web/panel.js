@@ -16,6 +16,93 @@ let inicioSesion = new Date().toISOString();
 let ultimaSecuencia = null;
 let demoTimer = null;
 const DEMO = new URLSearchParams(location.search).has('demo');
+const medicion = {calibracion: null, inicio_servidor_ms: 0, fotos: []};
+
+function consultarHora() {
+  return new Promise((resolver, rechazar) => {
+    let url;
+    try {
+      url = new URL($('script-url').value.trim());
+      if (url.origin !== 'https://script.google.com' ||
+          !/^\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(url.pathname)) throw new Error();
+    } catch (_) { rechazar(new Error('Ingresá la URL /exec de Google Apps Script.')); return; }
+    const nombre = 'camaraHora_' + Math.random().toString(36).slice(2);
+    const script = document.createElement('script');
+    const inicio = Date.now(), monotono = performance.now();
+    const limpiar = () => { clearTimeout(plazo); delete window[nombre]; script.remove(); };
+    const plazo = setTimeout(() => { limpiar(); rechazar(new Error('Google no respondió al reloj; verificá la versión del script.')); }, 20000);
+    window[nombre] = datos => {
+      const fin = Date.now(), vuelta = performance.now() - monotono;
+      limpiar();
+      if (!datos || !Number.isSafeInteger(datos.servidor_epoch_ms) ||
+          datos.servidor_epoch_ms < 1577836800000 || Math.abs(fin - inicio - vuelta) > 1000) {
+        rechazar(new Error('No se pudo comparar el reloj de forma válida.')); return;
+      }
+      resolver({desfase_ms: (inicio + fin) / 2 - datos.servidor_epoch_ms,
+        incertidumbre_ms: vuelta / 2, ida_vuelta_ms: vuelta});
+    };
+    script.onerror = () => { limpiar(); rechazar(new Error('No se pudo consultar la hora de Google.')); };
+    url.searchParams.set('reloj', '1'); url.searchParams.set('callback', nombre);
+    url.searchParams.set('nonce', nombre);
+    script.src = url.href; script.referrerPolicy = 'no-referrer'; document.head.append(script);
+  });
+}
+
+function actualizarMedicion() {
+  const cuerpo = $('tabla-medicion'); cuerpo.replaceChildren();
+  for (const f of medicion.fotos) {
+    const fila = document.createElement('tr');
+    for (const valor of [f.numero, f.motivo, f.subida_ms, f.captura_a_fila_ms,
+      f.captura_a_respuesta_ms, f.captura_a_panel_ms, f.intentos]) {
+      const celda = document.createElement('td'); celda.textContent = String(valor); fila.append(celda);
+    }
+    cuerpo.append(fila);
+  }
+  const resumen = DatosPanel.resumir(medicion.fotos);
+  $('resumen-medicion').textContent = resumen.cantidad ?
+    resumen.cantidad + '/10 fotos · Subida media ' + resumen.subida_ms.media.toFixed(0) +
+    ' ms; máxima ' + resumen.subida_ms.maxima + ' ms · Captura a fila media ' +
+    resumen.captura_a_fila_ms.media.toFixed(0) + ' ms · Captura a panel estimada media ' +
+    resumen.captura_a_panel_ms.media.toFixed(0) + ' ms' : '0/10 fotos válidas.';
+  if (resumen.cantidad === 10) $('medicion-estado').textContent = 'Muestra completa. Descargá los datos de la sesión antes de cerrar.';
+}
+
+$('preparar-medicion').addEventListener('click', async () => {
+  if (!cliente || !cliente.connected || DEMO) {
+    $('medicion-estado').textContent = 'Conectá primero el panel al broker real.'; return;
+  }
+  const boton = $('preparar-medicion'); boton.disabled = true;
+  const clienteActual = cliente;
+  medicion.calibracion = null;
+  $('medicion-estado').textContent = 'Comparando reloj con Google (tres consultas)…';
+  try {
+    const muestrasReloj = [];
+    for (let i = 0; i < 3; i++) muestrasReloj.push(await consultarHora());
+    if (cliente !== clienteActual || !cliente.connected) throw new Error('La conexión cambió; prepará nuevamente.');
+    const mejor = muestrasReloj.sort((a, b) => a.ida_vuelta_ms - b.ida_vuelta_ms)[0];
+    medicion.calibracion = {...mejor, muestras: muestrasReloj,
+      local_ms: Date.now(), monotono_ms: performance.now()};
+    medicion.inicio_servidor_ms = Date.now() - mejor.desfase_ms;
+    medicion.fotos = [];
+    $('medicion-estado').textContent = 'Lista: tomá fotos. Margen del ajuste de reloj ±' +
+      Math.ceil(mejor.incertidumbre_ms) + ' ms; no incluye el error de SNTP.';
+    actualizarMedicion();
+  } catch (error) { $('medicion-estado').textContent = error.message; }
+  finally { boton.disabled = false; }
+});
+
+function registrarMedicion(d, recibido) {
+  const reloj = medicion.calibracion;
+  if (!reloj || medicion.fotos.length >= 10) return;
+  if (Math.abs((Date.now() - reloj.local_ms) - (performance.now() - reloj.monotono_ms)) > 1000) {
+    medicion.calibracion = null;
+    $('medicion-estado').textContent = 'Cambió el reloj del equipo; prepará otra muestra.'; return;
+  }
+  if (!d.captura_epoch_ms || d.captura_epoch_ms < medicion.inicio_servidor_ms) return;
+  const fila = DatosPanel.medirFoto(d, recibido, reloj.desfase_ms);
+  if (!fila) { anotar('Foto sin medición válida de reloj/fila: ' + d.numero); return; }
+  medicion.fotos.push(fila); actualizarMedicion();
+}
 
 function anotar(texto) {
   registros.push(new Date().toISOString() + ' ' + texto);
@@ -122,6 +209,7 @@ function recibir(tema, carga, paquete = {}) {
     fotos.set(clave, {...d, recibido_ms: recibido});
     if (fotos.size > MAX_FOTOS) fotos.delete(fotos.keys().next().value);
     mostrarFoto(d, recibido);
+    registrarMedicion(d, recibido);
     anotar('Foto ' + d.numero + ' recibida; motivo ' + d.motivo + '; edad declarada ' + d.edad_ms + ' ms');
   }
 }
@@ -136,6 +224,8 @@ $('conexion').addEventListener('submit', evento => {
   evento.preventDefault(); cerrar();
   muestras.length = 0; fotos.clear(); registros.length = 0; ultimaSecuencia = null; ultimaMuestra = 0;
   inicioSesion = new Date().toISOString(); $('fotos').replaceChildren(); $('sin-fotos').hidden = false;
+  medicion.calibracion = null; medicion.inicio_servidor_ms = 0; medicion.fotos = [];
+  $('medicion-estado').textContent = 'Prepará la medición después de conectar.'; actualizarMedicion();
   $('rssi').textContent = '—'; $('temperatura').textContent = '—'; $('registro').textContent = '';
   for (const id of ['broker', 'raiz', 'dispositivo']) $(id).disabled = true;
   $('conectar').disabled = true; $('desconectar').disabled = false;
@@ -173,7 +263,8 @@ $('desconectar').addEventListener('click', cerrar);
 $('exportar').addEventListener('click', () => {
   const contenido = {inicio_sesion: inicioSesion, exportado: new Date().toISOString(),
     simulado: DEMO, broker: $('broker').value, raiz: $('raiz').value,
-    dispositivo: $('dispositivo').value, muestras, fotos: [...fotos.values()], registros};
+    dispositivo: $('dispositivo').value, muestras, fotos: [...fotos.values()], registros,
+    medicion: {...medicion, resumen: DatosPanel.resumir(medicion.fotos)}};
   const url = URL.createObjectURL(new Blob([JSON.stringify(contenido, null, 2)], {type: 'application/json'}));
   const enlace = document.createElement('a'); enlace.href = url; enlace.download = 'sesion-camara.json'; enlace.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);

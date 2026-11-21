@@ -32,6 +32,19 @@ test('rechaza formatos, temas y referencias peligrosas', () => {
   assert.equal(validar('comando', foto), null);
 });
 
+test('separa subida, respuesta, fila y recepción corregida del panel', () => {
+  const d = {...foto, captura_epoch_ms: 1790000000000, fila_epoch_ms: 1790000009000,
+    subida_ms: 15000, captura_a_respuesta_ms: 15500, intentos: 1};
+  const medida = DatosPanel.medirFoto(d, 1790000018000, 1000);
+  assert.equal(medida.captura_a_fila_ms, 9000);
+  assert.equal(medida.captura_a_panel_ms, 17000);
+  assert.equal(DatosPanel.medirFoto({...d, captura_epoch_ms: 0}, 1790000018000, 1000), null);
+  assert.equal(DatosPanel.medirFoto(d, 1790000018000, NaN), null);
+  const resumen = DatosPanel.resumir([medida, {...medida, subida_ms: 17000}]);
+  assert.equal(resumen.subida_ms.media, 16000);
+  assert.equal(resumen.subida_ms.maxima, 17000);
+});
+
 class Nodo {
   constructor() { this.children = []; this.listeners = {}; this.value = ''; this.textContent = ''; }
   append(...nodos) { this.children.push(...nodos); nodos.forEach(n => { n.parent = this; }); }

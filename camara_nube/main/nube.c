@@ -20,6 +20,7 @@
 
 #include <inttypes.h>
 #include <math.h>
+#include <stdlib.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -89,16 +90,18 @@ static int prefijo_json(char *dst, size_t n, const nube_foto_t *f)
                     "{\"token\":\"%s\",\"dispositivo\":\"%s\",\"arranque\":\"%s\","
                     "\"numero\":%" PRIu32 ",\"edad_ms\":%" PRIu32 ","
                     "\"ancho\":%u,\"alto\":%u,"
-                    "\"motivo\":\"%s\",\"rssi_dbm\":%s,\"temperatura_c\":%s,\"jpeg\":\"",
+                    "\"motivo\":\"%s\",\"rssi_dbm\":%s,\"temperatura_c\":%s,"
+                    "\"captura_epoch_ms\":%" PRIi64 ",\"jpeg\":\"",
                     s_cfg.token, s_cfg.dispositivo, s_cfg.arranque, f->numero,
-                    f->edad_ms, f->ancho, f->alto, motivo, rssi, temperatura);
+                    f->edad_ms, f->ancho, f->alto, motivo, rssi, temperatura,
+                    f->captura_epoch_ms);
 }
 
 static const char SUFIJO_JSON[] = "\"}";
 
 size_t nube_bytes_a_enviar(const nube_foto_t *foto)
 {
-    char prefijo[384];
+    char prefijo[512];
     const int n = prefijo_json(prefijo, sizeof(prefijo), foto);
     /* 4 caracteres por cada 3 bytes, redondeando hacia arriba: el último
      * grupo se completa con '='. Un JPEG de 40 000 B son 53 336 caracteres. */
@@ -137,6 +140,13 @@ static nube_resultado_t interpretar_json(const char *json, nube_informe_t *inf)
         }
         inf->repetida = (strstr(json, "\"repetida\":true") != NULL);
         valor_json(json, "id", inf->id_drive, sizeof(inf->id_drive));
+        const char *fila = strstr(json, "\"fila_epoch_ms\":");
+        if (fila != NULL) {
+            char *fin;
+            const int64_t valor = strtoll(fila + strlen("\"fila_epoch_ms\":"), &fin, 10);
+            if (valor >= 1577836800000LL && valor <= 4102444800000LL &&
+                    (*fin == ',' || *fin == '}')) inf->fila_epoch_ms = valor;
+        }
         return NUBE_OK;
     }
     if (strstr(json, "\"ok\":false") == NULL) {
@@ -188,7 +198,7 @@ static bool escribir(esp_http_client_handle_t c, const void *datos, size_t n)
 
 static nube_resultado_t enviar_foto(const nube_foto_t *f, nube_informe_t *inf)
 {
-    char prefijo[384];
+    char prefijo[512];
     const int n_prefijo = prefijo_json(prefijo, sizeof(prefijo), f);
     if (n_prefijo <= 0 || n_prefijo >= (int)sizeof(prefijo)) {
         strlcpy(inf->error, "identificador o token demasiado largos", sizeof(inf->error));

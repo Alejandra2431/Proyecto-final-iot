@@ -19,6 +19,7 @@ esp_err_t avisos_mqtt_iniciar(const avisos_mqtt_config_t *config);
 /* Copia el aviso sin esperar a la red. Llamar solo después de NUBE_OK.
  * Si la cola se llena, se pierde el aviso, no la foto que ya está en Drive. */
 bool avisos_mqtt_foto(const nube_foto_t *foto, const nube_informe_t *informe,
-                     int64_t captura_us);
+                     int64_t captura_us, uint32_t subida_ms,
+                     uint32_t captura_a_respuesta_ms, uint32_t intentos);
 
 void avisos_mqtt_informe(void);

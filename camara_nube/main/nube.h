@@ -51,6 +51,7 @@ typedef struct {
     uint32_t       edad_ms;     /* cuánto hace que se capturó: la nube calcula */
                                 /* la hora de captura con su propio reloj      */
     nube_metadatos_t metadatos;
+    int64_t        captura_epoch_ms; /* hora SNTP; 0 si aún no se sincronizó */
 } nube_foto_t;
 
 typedef enum {
@@ -72,6 +73,7 @@ typedef struct {
                                 /* no la guardó otra vez                       */
     char     nombre[96];        /* NUBE_OK: el nombre del archivo en Drive     */
     char     id_drive[96];      /* referencia al archivo, no da permisos       */
+    int64_t  fila_epoch_ms;     /* Google confirmó la escritura de la fila     */
     char     error[96];         /* lo demás: por qué no                        */
 } nube_informe_t;
 

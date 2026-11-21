@@ -24,6 +24,11 @@ typedef struct {
     uint16_t alto;
     size_t bytes;
     int64_t captura_us;
+    int64_t captura_epoch_ms;
+    int64_t fila_epoch_ms;
+    uint32_t subida_ms;
+    uint32_t captura_a_respuesta_ms;
+    uint32_t intentos;
     nube_metadatos_t datos;
     char id_drive[96];
 } aviso_foto_t;
@@ -89,7 +94,7 @@ static void tarea_avisos(void *arg)
             vTaskDelay(pdMS_TO_TICKS(250));
             continue;
         }
-        char json[640];
+        char json[896];
         char rssi[16], temperatura[16];
         if (!pendiente) pendiente = xQueueReceive(s_fotos, &foto, 0) == pdTRUE;
         if (pendiente) {
@@ -99,10 +104,14 @@ static void tarea_avisos(void *arg)
                 "{\"v\":1,\"dispositivo\":\"%s\",\"arranque\":\"%s\","
                 "\"numero\":%" PRIu32 ",\"motivo\":\"%s\",\"rssi_dbm\":%s,"
                 "\"temperatura_c\":%s,\"id_drive\":\"%s\",\"ancho\":%u,\"alto\":%u,"
-                "\"bytes\":%u,\"edad_ms\":%" PRIi64 "}",
+                "\"bytes\":%u,\"edad_ms\":%" PRIi64 ","
+                "\"captura_epoch_ms\":%" PRIi64 ",\"fila_epoch_ms\":%" PRIi64 ","
+                "\"subida_ms\":%" PRIu32 ",\"captura_a_respuesta_ms\":%" PRIu32 ","
+                "\"intentos\":%" PRIu32 "}",
                 s_cfg.dispositivo, s_cfg.arranque, foto.numero, foto.datos.motivo,
                 rssi, temperatura, foto.id_drive, foto.ancho, foto.alto,
-                (unsigned)foto.bytes, edad_ms);
+                (unsigned)foto.bytes, edad_ms, foto.captura_epoch_ms, foto.fila_epoch_ms,
+                foto.subida_ms, foto.captura_a_respuesta_ms, foto.intentos);
             if (n > 0 && n < sizeof(json)) {
                 const int id = esp_mqtt_client_enqueue(s_cliente, s_tema_foto, json, n, 1, 0, true);
                 if (id >= 0) {
@@ -170,7 +179,9 @@ esp_err_t avisos_mqtt_iniciar(const avisos_mqtt_config_t *config)
     return ESP_OK;
 }
 
-bool avisos_mqtt_foto(const nube_foto_t *foto, const nube_informe_t *informe, int64_t captura_us)
+bool avisos_mqtt_foto(const nube_foto_t *foto, const nube_informe_t *informe,
+                     int64_t captura_us, uint32_t subida_ms,
+                     uint32_t captura_a_respuesta_ms, uint32_t intentos)
 {
     if (!s_fotos || !identificador(informe->id_drive) ||
         !foto->metadatos.motivo ||
@@ -183,6 +194,9 @@ bool avisos_mqtt_foto(const nube_foto_t *foto, const nube_informe_t *informe, in
     aviso_foto_t aviso = {
         .numero = foto->numero, .ancho = foto->ancho, .alto = foto->alto,
         .bytes = foto->largo, .captura_us = captura_us, .datos = foto->metadatos,
+        .captura_epoch_ms = foto->captura_epoch_ms, .fila_epoch_ms = informe->fila_epoch_ms,
+        .subida_ms = subida_ms, .captura_a_respuesta_ms = captura_a_respuesta_ms,
+        .intentos = intentos,
     };
     strlcpy(aviso.id_drive, informe->id_drive, sizeof(aviso.id_drive));
     if (xQueueSend(s_fotos, &aviso, 0) != pdTRUE) {

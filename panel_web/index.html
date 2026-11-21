@@ -21,6 +21,7 @@
     .foto{margin:0;overflow:hidden}.foto h3{font-size:1.1rem;margin-top:0}.foto dl{display:grid;grid-template-columns:1fr 1fr;font-size:.9rem;gap:.25rem}
     dt{color:var(--suave)}dd{margin:0;text-align:right;overflow-wrap:anywhere}a{color:var(--azul)}iframe{width:100%;height:260px;border:0;margin-top:1rem}
     pre{max-height:220px;overflow:auto;white-space:pre-wrap;font-size:.875rem}#estado{font-weight:600}button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid #cf7d00;outline-offset:3px}
+    .tabla{overflow:auto}table{width:100%;border-collapse:collapse;font-size:.9rem}th,td{padding:.5rem;text-align:left;border-bottom:1px solid var(--borde)}
   </style>
   <script defer src="https://cdn.jsdelivr.net/npm/mqtt@5.15.2/dist/mqtt.min.js"></script>
   <script defer src="datos_panel.js"></script>
@@ -43,6 +44,16 @@
       <section><h2>Señal WiFi</h2><p class="valor" id="rssi">—</p><svg id="grafica-rssi" viewBox="0 0 460 190" role="img" aria-label="RSSI en dBm durante los últimos diez minutos"></svg></section>
       <section><h2>Temperatura del chip</h2><p class="valor" id="temperatura">—</p><svg id="grafica-temperatura" viewBox="0 0 460 190" role="img" aria-label="Temperatura del chip en grados Celsius durante los últimos diez minutos"></svg><p class="ayuda">Sensor interno; no representa necesariamente la temperatura ambiente.</p></section>
     </div>
+    <section aria-label="Medición final">
+      <h2>Medición de diez fotos</h2>
+      <label for="script-url">URL de la implementación del Apps Script (/exec)</label>
+      <input id="script-url" type="url" placeholder="https://script.google.com/macros/s/.../exec" style="max-width:100%">
+      <p><button id="preparar-medicion" type="button">Preparar medición</button></p>
+      <p id="medicion-estado" role="status">Esperando preparación del reloj y conexión MQTT.</p>
+      <p class="ayuda">Primero esperá “hora sincronizada” en la placa. Preparar compara tres veces el reloj del navegador con Google y empieza una muestra nueva. Las fotos anteriores no entran. Se mide la recepción del aviso, no la carga visual de la imagen.</p>
+      <p id="resumen-medicion"></p>
+      <div class="tabla"><table><thead><tr><th>Foto</th><th>Motivo</th><th>Subida (ms)</th><th>Captura a fila (ms)</th><th>Captura a respuesta (ms)</th><th>Captura a panel estimada (ms)</th><th>Intentos</th></tr></thead><tbody id="tabla-medicion"></tbody></table></div>
+    </section>
     <section><h2>Fotos confirmadas en Drive</h2><p class="ayuda">Abrí el panel antes de tomar las fotos. Para ver una imagen privada, iniciá sesión en Google con una cuenta que tenga acceso. No se cambian los permisos de Drive.</p><p id="sin-fotos">Esperando avisos de fotos.</p><div class="fotos" id="fotos"></div></section>
     <details><summary>Registro de recepción</summary><pre id="registro"></pre><button id="exportar" type="button">Descargar datos de la sesión</button></details>
     <p class="ayuda">Basado en el panel MQTT de Entrega6. Fotos por HTTPS; telemetría y avisos por MQTT.</p>
