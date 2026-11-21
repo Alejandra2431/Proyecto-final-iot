@@ -136,6 +136,7 @@ static nube_resultado_t interpretar_json(const char *json, nube_informe_t *inf)
             strlcpy(inf->nombre, "?", sizeof(inf->nombre));
         }
         inf->repetida = (strstr(json, "\"repetida\":true") != NULL);
+        valor_json(json, "id", inf->id_drive, sizeof(inf->id_drive));
         return NUBE_OK;
     }
     if (strstr(json, "\"ok\":false") == NULL) {

@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Cámara · Proyecto final</title>
+  <!-- Adaptación del panel de Entrega6: MQTT.js, conexión WSS y gráficas SVG.
+       Los datos recibidos se validan y se muestran con textContent. -->
+  <style>
+    :root{color-scheme:light;--azul:#1a3c6e;--borde:#d5dde8;--suave:#5b6878}
+    *{box-sizing:border-box}body{margin:0;background:#f4f6fa;color:#1d2733;font:16px/1.5 system-ui,sans-serif}
+    header{background:var(--azul);color:white;padding:1.5rem}header div,main{max-width:1100px;margin:auto}
+    h1{margin:0;font-size:1.8rem}h2{font-size:1.25rem}p{margin:.5rem 0}main{padding:1rem}
+    section,.foto{background:white;border:1px solid var(--borde);border-radius:10px;padding:1rem;margin-bottom:1rem}
+    .controles,.graficas{display:flex;gap:1rem;flex-wrap:wrap;align-items:end}.graficas{align-items:stretch}
+    .graficas section{flex:1;min-width:280px}label{display:block;font-size:.9rem}input,select,button{font:inherit;padding:.5rem;border:1px solid var(--borde);border-radius:5px}
+    input{width:100%;max-width:24rem}button{cursor:pointer;background:var(--azul);color:white}button:disabled{opacity:.6;cursor:default}
+    select{appearance:none;background:#fff;padding-right:2rem;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8'%3E%3Cpath d='m1 1 5 5 5-5' fill='none' stroke='%231a3c6e' stroke-width='2'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right .6rem center}
+    .ayuda{color:var(--suave);font-size:.9rem}.valor{font-size:2rem;font-weight:650}.graficas svg{width:100%;height:auto;display:block}
+    svg text{font:13px system-ui;fill:var(--suave)}.fotos{display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:1rem}
+    .foto{margin:0;overflow:hidden}.foto h3{font-size:1.1rem;margin-top:0}.foto dl{display:grid;grid-template-columns:1fr 1fr;font-size:.9rem;gap:.25rem}
+    dt{color:var(--suave)}dd{margin:0;text-align:right;overflow-wrap:anywhere}a{color:var(--azul)}iframe{width:100%;height:260px;border:0;margin-top:1rem}
+    pre{max-height:220px;overflow:auto;white-space:pre-wrap;font-size:.875rem}#estado{font-weight:600}button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid #cf7d00;outline-offset:3px}
+  </style>
+  <script defer src="https://cdn.jsdelivr.net/npm/mqtt@5.15.2/dist/mqtt.min.js"></script>
+  <script defer src="datos_panel.js"></script>
+  <script defer src="panel.js"></script>
+</head>
+<body>
+  <header><div><h1>Cámara conectada</h1><p>Proyecto final · RSSI, temperatura y fotos</p></div></header>
+  <main>
+    <section aria-label="Conexión MQTT">
+      <form id="conexion" class="controles">
+        <div><label for="broker">Broker</label><select id="broker"><option value="hivemq">HiveMQ</option><option value="emqx">EMQX</option></select></div>
+        <div><label for="raiz">Raíz de temas</label><input id="raiz" value="ucu-camara-2026-sosadias" required pattern="[A-Za-z0-9_-]{1,64}" maxlength="64"></div>
+        <div><label for="dispositivo">Dispositivo</label><input id="dispositivo" value="kaluga-00907c" required pattern="[A-Za-z0-9_-]{1,32}" maxlength="32"></div>
+        <button id="conectar" type="submit">Conectar</button><button id="desconectar" type="button" disabled>Desconectar</button>
+      </form>
+      <p id="estado" role="status">Desconectado</p><p class="ayuda" id="ultima">Todavía no hay muestras.</p>
+      <p class="ayuda">Usá el mismo broker y raíz configurados en la placa. El historial se muestra desde que abrís este panel. Las lecturas del broker público no están autenticadas.</p>
+    </section>
+    <div class="graficas">
+      <section><h2>Señal WiFi</h2><p class="valor" id="rssi">—</p><svg id="grafica-rssi" viewBox="0 0 460 190" role="img" aria-label="RSSI en dBm durante los últimos diez minutos"></svg></section>
+      <section><h2>Temperatura del chip</h2><p class="valor" id="temperatura">—</p><svg id="grafica-temperatura" viewBox="0 0 460 190" role="img" aria-label="Temperatura del chip en grados Celsius durante los últimos diez minutos"></svg><p class="ayuda">Sensor interno; no representa necesariamente la temperatura ambiente.</p></section>
+    </div>
+    <section><h2>Fotos confirmadas en Drive</h2><p class="ayuda">Abrí el panel antes de tomar las fotos. Para ver una imagen privada, iniciá sesión en Google con una cuenta que tenga acceso. No se cambian los permisos de Drive.</p><p id="sin-fotos">Esperando avisos de fotos.</p><div class="fotos" id="fotos"></div></section>
+    <details><summary>Registro de recepción</summary><pre id="registro"></pre><button id="exportar" type="button">Descargar datos de la sesión</button></details>
+    <p class="ayuda">Basado en el panel MQTT de Entrega6. Fotos por HTTPS; telemetría y avisos por MQTT.</p>
+  </main>
+</body>
+</html>

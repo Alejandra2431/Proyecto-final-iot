@@ -1,5 +1,7 @@
 # Componentes gestionados que ESP-IDF descarga automáticamente al compilar.
 dependencies:
+  # MQTT se instala aparte desde ESP-IDF 6, igual que en Entrega6.
+  espressif/mqtt: "^1.1.0"
   # El driver de cámaras de Espressif: OV2640 y una veintena de sensores más.
   # En el ESP32-S2 usa el único I2S en "modo cámara", con DMA.
   espressif/esp32-camera: "^2.1.8"

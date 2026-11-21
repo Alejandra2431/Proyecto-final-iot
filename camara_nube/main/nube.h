@@ -71,6 +71,7 @@ typedef struct {
     bool     repetida;          /* la nube ya la tenía de un intento anterior: */
                                 /* no la guardó otra vez                       */
     char     nombre[96];        /* NUBE_OK: el nombre del archivo en Drive     */
+    char     id_drive[96];      /* referencia al archivo, no da permisos       */
     char     error[96];         /* lo demás: por qué no                        */
 } nube_informe_t;
 

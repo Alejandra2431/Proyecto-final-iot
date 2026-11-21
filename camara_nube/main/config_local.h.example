@@ -6,3 +6,8 @@
 #define WIFI_CLAVE "clave-de-tu-red"
 #define NUBE_URL   "https://script.google.com/macros/s/PEGA-AQUI-EL-ID/exec"
 #define NUBE_TOKEN "pega-aqui-el-token"
+
+/* Opcional: si se cambian, usar el mismo broker y raíz en el panel.
+ * Sin estas líneas se usa HiveMQ y ucu-camara-2026-sosadias. */
+// #define MQTT_BROKER "mqtts://broker.hivemq.com:8883"
+// #define MQTT_RAIZ "ucu-camara-2026-sosadias"

@@ -44,6 +44,7 @@
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "camara.h"
+#include "avisos_mqtt.h"
 #include "imagen.h"
 #include "movimiento.h"
 #include "informe.h"
@@ -59,6 +60,15 @@
 /* Las claves quedan en un archivo local que no se sube a Git.
  * Para configurar otra copia, usar config_local.h.example como modelo. */
 #include "config_local.h"
+
+/* Mismo broker del ejemplo de clase, con TLS. La raíz también va en el panel.
+ * Son datos públicos; las claves WiFi y de Google siguen en config_local.h. */
+#ifndef MQTT_BROKER
+#define MQTT_BROKER "mqtts://broker.hivemq.com:8883"
+#endif
+#ifndef MQTT_RAIZ
+#define MQTT_RAIZ "ucu-camara-2026-sosadias"
+#endif
 
 /* Seguridad de la red: descomenta UNA sola línea. Es el MÍNIMO que se acepta. */
 //#define WIFI_SEGURIDAD_WPA        /* WPA  (TKIP): routers muy antiguos   */
@@ -230,6 +240,7 @@ typedef struct {
 static EventGroupHandle_t s_eventos;        /* EV_WIFI_OK (de red_wifi.c)   */
 static QueueHandle_t      s_cola_fotos;     /* visor -> subida              */
 static SemaphoreHandle_t  s_mutex_estado;
+static SemaphoreHandle_t  s_mutex_mediciones;
 static TaskHandle_t       s_tarea_visor;
 static TimerHandle_t      s_timer_informe;
 static TimerHandle_t      s_timer_foto;
@@ -345,6 +356,25 @@ static void configurar_boton(void)
 /*  La foto: del driver a la cola                                            */
 /* ======================================================================== */
 
+static void leer_mediciones(nube_metadatos_t *datos)
+{
+    datos->rssi_valido = false;
+    datos->temperatura_valida = false;
+    /* El visor y telemetría comparten el sensor de temperatura. */
+    xSemaphoreTake(s_mutex_mediciones, portMAX_DELAY);
+    wifi_ap_record_t ap;
+    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+        datos->rssi_dbm = ap.rssi;
+        datos->rssi_valido = true;
+    }
+    if (s_temperatura != NULL &&
+            temperature_sensor_get_celsius(s_temperatura, &datos->temperatura_c) == ESP_OK &&
+            isfinite(datos->temperatura_c)) {
+        datos->temperatura_valida = true;
+    }
+    xSemaphoreGive(s_mutex_mediciones);
+}
+
 static void tomar_foto(uint32_t pulsacion_ms, const char *motivo)
 {
 
@@ -379,17 +409,7 @@ static void tomar_foto(uint32_t pulsacion_ms, const char *motivo)
 
     /* Leemos cerca de la captura y guardamos los valores con la foto.
      * No se vuelven a leer al subir: podría haber esperado sin WiFi. */
-    wifi_ap_record_t ap;
-    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
-        f.metadatos.rssi_dbm = ap.rssi;
-        f.metadatos.rssi_valido = true;
-    }
-    if (s_temperatura != NULL &&
-            temperature_sensor_get_celsius(s_temperatura,
-                &f.metadatos.temperatura_c) == ESP_OK &&
-            isfinite(f.metadatos.temperatura_c)) {
-        f.metadatos.temperatura_valida = true;
-    }
+    leer_mediciones(&f.metadatos);
     char rssi[16] = "sin dato";
     char temperatura[16] = "sin dato";
     if (f.metadatos.rssi_valido) {
@@ -631,6 +651,7 @@ static void tarea_subida(void *arg)
                          f.numero, inf.nombre, inf.ms_envio, inf.ms_respuesta,
                          (unsigned)inf.bytes,
                          inf.repetida ? "; ya estaba de un intento anterior" : "");
+                avisos_mqtt_foto(&nf, &inf, f.captura_us);
                 terminada = true;
             } else if (r == NUBE_RECHAZADA) {
                 ESP_LOGE(TAG, "[subida] foto %" PRIu32 " rechazada, se descarta: %s",
@@ -687,6 +708,7 @@ static void informe(TimerHandle_t timer)
              s_id, INFORME_PERIODO_MS / 1000);
     informe_tareas(TAG);
     informe_memoria(TAG);
+    avisos_mqtt_informe();
     ESP_LOGI(TAG, "  WiFi %s;  conexiones %" PRIu32 ", desconexiones %" PRIu32,
              w.conectada ? "SI" : "no", w.conexiones, w.desconexiones);
     ESP_LOGI(TAG, "  fotos: tomadas %" PRIu32 ", subidas %" PRIu32 " (repetidas %"
@@ -773,7 +795,8 @@ void app_main(void)
     s_eventos      = xEventGroupCreate();
     s_cola_fotos   = xQueueCreate(COLA_FOTOS_LARGO, sizeof(foto_t));
     s_mutex_estado = xSemaphoreCreateMutex();
-    ESP_ERROR_CHECK((s_eventos && s_cola_fotos && s_mutex_estado) ? ESP_OK
+    s_mutex_mediciones = xSemaphoreCreateMutex();
+    ESP_ERROR_CHECK((s_eventos && s_cola_fotos && s_mutex_estado && s_mutex_mediciones) ? ESP_OK
                                                                   : ESP_ERR_NO_MEM);
 
     /* --- Red, identidad y nube --------------------------------------------- */
@@ -804,6 +827,13 @@ void app_main(void)
     if (!s_nube_lista) {
         anotar("SIN NUBE");                 /* el log dice qué falta */
     }
+
+    const avisos_mqtt_config_t mqtt = {
+        .broker = MQTT_BROKER, .raiz = MQTT_RAIZ,
+        .dispositivo = s_id, .arranque = s_arranque,
+        .eventos_wifi = s_eventos, .leer_mediciones = leer_mediciones,
+    };
+    ESP_ERROR_CHECK(avisos_mqtt_iniciar(&mqtt));
 
     /* --- Las tareas -------------------------------------------------------- */
     xTaskCreate(tarea_visor, "visor", PILA_VISOR, NULL, PRIO_VISOR, &s_tarea_visor);
