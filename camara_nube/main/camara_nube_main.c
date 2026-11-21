@@ -82,7 +82,14 @@
 
 /* Además del botón BOOT, una foto automática cada tantos segundos.
  * 0: solo con el botón. */
-#define FOTO_CADA_S         0
+#define FOTO_CADA_S         120
+
+/* Evita fotos seguidas, aunque las pidan disparadores distintos. */
+#define FOTO_TIEMPO_MUERTO_S 5
+
+#if FOTO_CADA_S < 0 || FOTO_TIEMPO_MUERTO_S < 0
+#error "Los tiempos de las fotos no pueden ser negativos"
+#endif
 
 /* ======================================================================== */
 
@@ -153,7 +160,9 @@
 
 #define INFORME_PERIODO_MS  30000
 
-#define AVISO_FOTO          (1u << 0)
+#define AVISO_BOTON         (1u << 0)
+#define AVISO_PERIODICA     (1u << 1)
+#define AVISOS_FOTO         (AVISO_BOTON | AVISO_PERIODICA)
 
 #define NEGRO               0x0000
 #define BLANCO              0xFFFF
@@ -211,7 +220,6 @@ static estado_t s_estado = { .ultimo = "LISTA" };
 static bool     s_nube_lista;
 
 static uint8_t *s_jpeg;                     /* el cuadro del visor          */
-static volatile uint32_t s_pulsacion_ms;    /* cuándo se pidió la foto      */
 
 static char s_id[24];                       /* "kaluga-0ab2c3", de la MAC   */
 static char s_arranque[12];                 /* al azar en cada arranque     */
@@ -283,18 +291,16 @@ static void IRAM_ATTR al_pulsar_boot(void *arg)
         return;
     }
     anterior_ms = ahora_ms;
-    s_pulsacion_ms = ahora_ms;
 
     BaseType_t despertar = pdFALSE;
-    xTaskNotifyFromISR(s_tarea_visor, AVISO_FOTO, eSetBits, &despertar);
+    xTaskNotifyFromISR(s_tarea_visor, AVISO_BOTON, eSetBits, &despertar);
     portYIELD_FROM_ISR(despertar);
 }
 
-/* Corre en "Tmr Svc": es lo mismo que pulsar el botón. */
+/* Corre en Tmr Svc: solo avisa, no captura ni espera a la red. */
 static void foto_periodica(TimerHandle_t timer)
 {
-    s_pulsacion_ms = (uint32_t)(esp_timer_get_time() / 1000);
-    xTaskNotify(s_tarea_visor, AVISO_FOTO, eSetBits);
+    xTaskNotify(s_tarea_visor, AVISO_PERIODICA, eSetBits);
 }
 
 static void configurar_boton(void)
@@ -319,9 +325,8 @@ static void configurar_boton(void)
 /*  La foto: del driver a la cola                                            */
 /* ======================================================================== */
 
-static void tomar_foto(void)
+static void tomar_foto(uint32_t pulsacion_ms)
 {
-    const uint32_t pulsacion_ms = s_pulsacion_ms;
 
     /* El primer cuadro que empezó DESPUÉS de pedir la foto (ejemplo 1). */
     camera_fb_t *fb = esp_camera_fb_get();
@@ -403,20 +408,39 @@ static void tomar_foto(void)
 
 static void tarea_visor(void *arg)
 {
-    bool otra_foto = false;             /* pulsaron con la foto en pantalla */
+    uint32_t pendientes = 0;
+    int64_t ultima_solicitud_us = 0;
+    bool hubo_solicitud = false;
 
     while (1) {
         /* Como en el ejemplo 1: «avisos» solo vale si se devolvió pdTRUE. */
         uint32_t avisos = 0;
-        if (otra_foto ||
-            (xTaskNotifyWait(0, UINT32_MAX, &avisos, 0) == pdTRUE &&
-             (avisos & AVISO_FOTO))) {
-            tomar_foto();
-            /* En pantalla hasta el plazo, o hasta la pulsación siguiente. */
-            otra_foto = (xTaskNotifyWait(0, UINT32_MAX, &avisos,
-                                         pdMS_TO_TICKS(FOTO_EN_PANTALLA_MS)) == pdTRUE &&
-                         (avisos & AVISO_FOTO));
-            continue;
+        if (xTaskNotifyWait(0, UINT32_MAX, &avisos, 0) == pdTRUE) {
+            pendientes |= avisos & AVISOS_FOTO;
+        }
+        if (pendientes != 0) {
+            /* Si ambos avisos llegan juntos, BOOT tiene prioridad.
+             * Solo el visor decide: no hay dos tareas tomando fotos a la vez. */
+            const char *motivo = (pendientes & AVISO_BOTON) ? "boton" : "periodica";
+            const int64_t ahora_us = esp_timer_get_time();
+            pendientes = 0;
+            if (hubo_solicitud && ahora_us - ultima_solicitud_us <
+                    (int64_t)FOTO_TIEMPO_MUERTO_S * 1000000) {
+                ESP_LOGI(TAG, "[disparo] %s descartado: tiempo muerto", motivo);
+            } else {
+                /* El plazo empieza al aceptar el pedido, incluso si falla
+                 * la captura. Los pedidos descartados no quedan para después. */
+                hubo_solicitud = true;
+                ultima_solicitud_us = ahora_us;
+                ESP_LOGI(TAG, "[disparo] %s aceptado a %" PRIi64 " ms",
+                         motivo, ahora_us / 1000);
+                tomar_foto(us_a_ms(ahora_us));
+                if (xTaskNotifyWait(0, UINT32_MAX, &avisos,
+                        pdMS_TO_TICKS(FOTO_EN_PANTALLA_MS)) == pdTRUE) {
+                    pendientes = avisos & AVISOS_FOTO;
+                }
+                continue;
+            }
         }
 
         camera_fb_t *fb = esp_camera_fb_get();
