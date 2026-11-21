@@ -35,6 +35,14 @@ typedef struct {
 } nube_config_t;
 
 typedef struct {
+    const char *motivo;         /* literal fijo: boton, periodica o movimiento */
+    int         rssi_dbm;
+    bool        rssi_valido;    /* sin WiFi no hay una lectura disponible     */
+    float       temperatura_c;
+    bool        temperatura_valida;
+} nube_metadatos_t;
+
+typedef struct {
     const uint8_t *jpeg;
     size_t         largo;
     uint16_t       ancho;
@@ -42,6 +50,7 @@ typedef struct {
     uint32_t       numero;      /* foto n.º desde el arranque                 */
     uint32_t       edad_ms;     /* cuánto hace que se capturó: la nube calcula */
                                 /* la hora de captura con su propio reloj      */
+    nube_metadatos_t metadatos;
 } nube_foto_t;
 
 typedef enum {

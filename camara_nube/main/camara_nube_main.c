@@ -22,6 +22,7 @@
  */
 
 #include <inttypes.h>
+#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -33,6 +34,7 @@
 #include "freertos/task.h"
 #include "freertos/timers.h"
 #include "driver/gpio.h"
+#include "driver/temperature_sensor.h"
 #include "esp_attr.h"
 #include "esp_camera.h"
 #include "esp_heap_caps.h"
@@ -40,6 +42,7 @@
 #include "esp_mac.h"
 #include "esp_random.h"
 #include "esp_timer.h"
+#include "esp_wifi.h"
 #include "camara.h"
 #include "imagen.h"
 #include "informe.h"
@@ -183,6 +186,7 @@ typedef struct {
     uint32_t numero;
     uint16_t ancho;
     uint16_t alto;
+    nube_metadatos_t metadatos;
 } foto_t;
 
 /* Lo que se cuenta y lo que enseña la barra de estado. Lo escriben el visor
@@ -215,6 +219,7 @@ static SemaphoreHandle_t  s_mutex_estado;
 static TaskHandle_t       s_tarea_visor;
 static TimerHandle_t      s_timer_informe;
 static TimerHandle_t      s_timer_foto;
+static temperature_sensor_handle_t s_temperatura;
 
 static estado_t s_estado = { .ultimo = "LISTA" };
 static bool     s_nube_lista;
@@ -325,7 +330,7 @@ static void configurar_boton(void)
 /*  La foto: del driver a la cola                                            */
 /* ======================================================================== */
 
-static void tomar_foto(uint32_t pulsacion_ms)
+static void tomar_foto(uint32_t pulsacion_ms, const char *motivo)
 {
 
     /* El primer cuadro que empezó DESPUÉS de pedir la foto (ejemplo 1). */
@@ -350,11 +355,35 @@ static void tomar_foto(uint32_t pulsacion_ms)
         .captura_us = camara_marca_us(fb),
         .ancho = (uint16_t)fb->width,
         .alto = (uint16_t)fb->height,
+        .metadatos = { .motivo = motivo },
     };
     if (f.jpeg != NULL) {
         memcpy(f.jpeg, fb->buf, fb->len);
     }
     esp_camera_fb_return(fb);
+
+    /* Leemos cerca de la captura y guardamos los valores con la foto.
+     * No se vuelven a leer al subir: podría haber esperado sin WiFi. */
+    wifi_ap_record_t ap;
+    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+        f.metadatos.rssi_dbm = ap.rssi;
+        f.metadatos.rssi_valido = true;
+    }
+    if (s_temperatura != NULL &&
+            temperature_sensor_get_celsius(s_temperatura,
+                &f.metadatos.temperatura_c) == ESP_OK &&
+            isfinite(f.metadatos.temperatura_c)) {
+        f.metadatos.temperatura_valida = true;
+    }
+    char rssi[16] = "sin dato";
+    char temperatura[16] = "sin dato";
+    if (f.metadatos.rssi_valido) {
+        snprintf(rssi, sizeof(rssi), "%d", f.metadatos.rssi_dbm);
+    }
+    if (f.metadatos.temperatura_valida) {
+        snprintf(temperatura, sizeof(temperatura), "%.1f", f.metadatos.temperatura_c);
+    }
+    ESP_LOGI(TAG, "[metadatos] %s; RSSI %s dBm; chip %s C", motivo, rssi, temperatura);
 
     xSemaphoreTake(s_mutex_estado, portMAX_DELAY);
     f.numero = ++s_estado.tomadas;
@@ -434,7 +463,7 @@ static void tarea_visor(void *arg)
                 ultima_solicitud_us = ahora_us;
                 ESP_LOGI(TAG, "[disparo] %s aceptado a %" PRIi64 " ms",
                          motivo, ahora_us / 1000);
-                tomar_foto(us_a_ms(ahora_us));
+                tomar_foto(us_a_ms(ahora_us), motivo);
                 if (xTaskNotifyWait(0, UINT32_MAX, &avisos,
                         pdMS_TO_TICKS(FOTO_EN_PANTALLA_MS)) == pdTRUE) {
                     pendientes = avisos & AVISOS_FOTO;
@@ -515,6 +544,7 @@ static void tarea_subida(void *arg)
                 .ancho = f.ancho,
                 .alto = f.alto,
                 .numero = f.numero,
+                .metadatos = f.metadatos,
                 /* La «edad» de la Clase 6: la nube resta este número a su
                  * propia hora para saber cuándo se sacó la foto. */
                 .edad_ms = us_a_ms(esp_timer_get_time() - f.captura_us),
@@ -662,6 +692,22 @@ void app_main(void)
     s_jpeg = heap_caps_malloc(camara_tamano_buffer(), MALLOC_CAP_SPIRAM);
     ESP_ERROR_CHECK(s_jpeg != NULL ? ESP_OK : ESP_ERR_NO_MEM);
     ESP_ERROR_CHECK(imagen_iniciar());
+
+    /* Es la temperatura del chip, no la del ambiente. Si falla el sensor,
+     * seguimos tomando fotos y enviamos null en lugar de inventar un cero. */
+    const temperature_sensor_config_t temp_cfg =
+        TEMPERATURE_SENSOR_CONFIG_DEFAULT(10, 80);
+    esp_err_t temp_err = temperature_sensor_install(&temp_cfg, &s_temperatura);
+    if (temp_err == ESP_OK) {
+        temp_err = temperature_sensor_enable(s_temperatura);
+        if (temp_err != ESP_OK) {
+            temperature_sensor_uninstall(s_temperatura);
+            s_temperatura = NULL;
+        }
+    }
+    if (temp_err != ESP_OK) {
+        ESP_LOGW(TAG, "temperatura no disponible: %s", esp_err_to_name(temp_err));
+    }
 
     /* --- Objetos del kernel, ANTES de las tareas que los usan ------------ */
     s_eventos      = xEventGroupCreate();

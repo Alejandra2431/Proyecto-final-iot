@@ -25,7 +25,7 @@
  * token. Por eso el token no se publica ni se sube a ningún repositorio.
  */
 
-const VERSION = 'clase7-1.0';
+const VERSION = 'proyecto-1.1-metadatos';
 
 /* Una foto UXGA con calidad alta ronda los 300 KB. 2 MB es un tope contra
  * abusos, no contra fotos normales. */
@@ -41,7 +41,8 @@ const RECUERDO_S = 6 * 60 * 60;
 const NOMBRE_CARPETA = 'Kaluga - fotos';
 const NOMBRE_HOJA = 'Kaluga - registro de fotos';
 const ENCABEZADO = ['Captura', 'Recibida', 'Dispositivo', 'Foto n.º', 'Archivo',
-                    'Bytes', 'Resolución', 'Espera en la placa (s)', 'Enlace'];
+                    'Bytes', 'Resolución', 'Espera en la placa (s)', 'Enlace',
+                    'Motivo', 'RSSI (dBm)', 'Temperatura chip (°C)'];
 
 /* ======================================================================= */
 /*  Instalación: se ejecutan a mano desde el editor                         */
@@ -98,6 +99,7 @@ function probar() {
       contents: JSON.stringify({
         token: token, dispositivo: 'prueba-editor', arranque: 'editor',
         numero: Date.now() % 100000, edad_ms: 0, ancho: 1, alto: 1,
+        motivo: 'boton', rssi_dbm: null, temperatura_c: null,
         jpeg: JPEG_DE_PRUEBA,
       }),
     },
@@ -182,6 +184,10 @@ function recibir(e) {
   if (numero === null || edadMs === null || ancho === null || alto === null) {
     return { ok: false, error: 'formato' };
   }
+  const metadatos = leerMetadatos(d);
+  if (metadatos === null) {
+    return { ok: false, error: 'formato' };
+  }
 
   // 2. ¿Ya se guardó? Si la respuesta se perdió por el camino, la placa
   //    reintenta la MISMA foto: sin esto, quedaría dos veces en Drive. Es el
@@ -197,14 +203,14 @@ function recibir(e) {
     return { ok: false, error: 'ocupado' };
   }
   try {
-    return guardar(d, dispositivo, arranque, numero, edadMs, ancho, alto, props);
+    return guardar(d, dispositivo, arranque, numero, edadMs, ancho, alto, props, metadatos);
   } finally {
     cerrojo.releaseLock();
   }
 }
 
 /** Pasos 2 a 5, con el cerrojo tomado. */
-function guardar(d, dispositivo, arranque, numero, edadMs, ancho, alto, props) {
+function guardar(d, dispositivo, arranque, numero, edadMs, ancho, alto, props, metadatos) {
   const cache = CacheService.getScriptCache();
   const clave = ['hecha', dispositivo, arranque, numero].join('_');
   const previa = cache.get(clave);
@@ -243,6 +249,11 @@ function guardar(d, dispositivo, arranque, numero, edadMs, ancho, alto, props) {
                  Utilities.formatDate(captura, zona, 'yyyy-MM-dd_HH-mm-ss') +
                  '_' + numero + '.jpg';
 
+  // Ampliamos solo el encabezado, sin mover columnas ni tocar filas anteriores.
+  // Se hace con el cerrojo tomado, antes de crear el archivo.
+  const hoja = SpreadsheetApp.openById(props.getProperty('HOJA_ID')).getSheets()[0];
+  completarEncabezado(hoja);
+
   // 4. Drive.
   const carpeta = DriveApp.getFolderById(props.getProperty('CARPETA_ID'));
   const archivo = carpeta.createFile(Utilities.newBlob(bytes, 'image/jpeg', nombre));
@@ -250,9 +261,9 @@ function guardar(d, dispositivo, arranque, numero, edadMs, ancho, alto, props) {
                          ancho + 'x' + alto + ', ' + VERSION);
 
   // 5. La hoja. appendRow() es atómica: varias placas a la vez no se pisan.
-  const hoja = SpreadsheetApp.openById(props.getProperty('HOJA_ID')).getSheets()[0];
   hoja.appendRow([captura, ahora, dispositivo, numero, nombre, n,
-                  ancho + 'x' + alto, Math.round(edadMs / 1000), archivo.getUrl()]);
+                  ancho + 'x' + alto, Math.round(edadMs / 1000), archivo.getUrl(),
+                  metadatos.motivo, metadatos.rssi, metadatos.temperatura]);
 
   const resultado = { ok: true, nombre: nombre, id: archivo.getId(), bytes: n };
   cache.put(clave, JSON.stringify(resultado), RECUERDO_S);
@@ -262,6 +273,41 @@ function guardar(d, dispositivo, arranque, numero, edadMs, ancho, alto, props) {
 /* ======================================================================= */
 /*  Utilidades                                                               */
 /* ======================================================================= */
+
+function leerMetadatos(d) {
+  // La versión de clase no enviaba estos campos: sus filas quedan sin dato.
+  const motivo = d.motivo === undefined ? '' : d.motivo;
+  if (!['', 'boton', 'periodica', 'movimiento'].includes(motivo) ||
+      (motivo === '' && d.motivo !== undefined)) {
+    return null;
+  }
+  const rssi = d.rssi_dbm;
+  const temperatura = d.temperatura_c;
+  if (rssi !== undefined && rssi !== null && entero(rssi, -127, 0) === null) {
+    return null;
+  }
+  if (temperatura !== undefined && temperatura !== null &&
+      (typeof temperatura !== 'number' || !Number.isFinite(temperatura) ||
+       temperatura < -40 || temperatura > 125)) {
+    return null;
+  }
+  // null se guarda como celda vacía, no como una medición de cero.
+  return { motivo: motivo, rssi: rssi == null ? '' : rssi,
+           temperatura: temperatura == null ? '' : temperatura };
+}
+
+function completarEncabezado(hoja) {
+  const actual = hoja.getRange(1, 1, 1, ENCABEZADO.length).getValues()[0];
+  // No sobrescribir columnas de una hoja con una estructura diferente.
+  for (let i = 0; i < ENCABEZADO.length; i++) {
+    if (actual[i] !== ENCABEZADO[i] && !(i >= 9 && actual[i] === '')) {
+      throw new Error('Encabezado inesperado en columna ' + (i + 1));
+    }
+  }
+  if (actual.slice(9).some((valor, i) => valor !== ENCABEZADO[i + 9])) {
+    hoja.getRange(1, 10, 1, 3).setValues([ENCABEZADO.slice(9)]);
+  }
+}
 
 function responder(objeto) {
   return ContentService.createTextOutput(JSON.stringify(objeto))

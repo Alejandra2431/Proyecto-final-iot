@@ -19,6 +19,7 @@
  */
 
 #include <inttypes.h>
+#include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -66,19 +67,38 @@ static uint32_t ms_desde(int64_t t0_us)
 /* Lo que se escribe antes y después de la foto en el JSON. */
 static int prefijo_json(char *dst, size_t n, const nube_foto_t *f)
 {
+    /* null significa que no hubo lectura. Cero sería una medición distinta. */
+    char rssi[16] = "null";
+    char temperatura[16] = "null";
+    if (f->metadatos.rssi_valido) {
+        snprintf(rssi, sizeof(rssi), "%d", f->metadatos.rssi_dbm);
+    }
+    if (f->metadatos.temperatura_valida && isfinite(f->metadatos.temperatura_c)) {
+        snprintf(temperatura, sizeof(temperatura), "%.1f", f->metadatos.temperatura_c);
+    }
+    /* Solo estos textos fijos se escriben en el JSON. */
+    const char *motivo = "boton";
+    if (f->metadatos.motivo != NULL &&
+            strcmp(f->metadatos.motivo, "periodica") == 0) {
+        motivo = "periodica";
+    } else if (f->metadatos.motivo != NULL &&
+            strcmp(f->metadatos.motivo, "movimiento") == 0) {
+        motivo = "movimiento";
+    }
     return snprintf(dst, n,
                     "{\"token\":\"%s\",\"dispositivo\":\"%s\",\"arranque\":\"%s\","
                     "\"numero\":%" PRIu32 ",\"edad_ms\":%" PRIu32 ","
-                    "\"ancho\":%u,\"alto\":%u,\"jpeg\":\"",
+                    "\"ancho\":%u,\"alto\":%u,"
+                    "\"motivo\":\"%s\",\"rssi_dbm\":%s,\"temperatura_c\":%s,\"jpeg\":\"",
                     s_cfg.token, s_cfg.dispositivo, s_cfg.arranque, f->numero,
-                    f->edad_ms, f->ancho, f->alto);
+                    f->edad_ms, f->ancho, f->alto, motivo, rssi, temperatura);
 }
 
 static const char SUFIJO_JSON[] = "\"}";
 
 size_t nube_bytes_a_enviar(const nube_foto_t *foto)
 {
-    char prefijo[256];
+    char prefijo[384];
     const int n = prefijo_json(prefijo, sizeof(prefijo), foto);
     /* 4 caracteres por cada 3 bytes, redondeando hacia arriba: el último
      * grupo se completa con '='. Un JPEG de 40 000 B son 53 336 caracteres. */
@@ -167,7 +187,7 @@ static bool escribir(esp_http_client_handle_t c, const void *datos, size_t n)
 
 static nube_resultado_t enviar_foto(const nube_foto_t *f, nube_informe_t *inf)
 {
-    char prefijo[256];
+    char prefijo[384];
     const int n_prefijo = prefijo_json(prefijo, sizeof(prefijo), f);
     if (n_prefijo <= 0 || n_prefijo >= (int)sizeof(prefijo)) {
         strlcpy(inf->error, "identificador o token demasiado largos", sizeof(inf->error));
