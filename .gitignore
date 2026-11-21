@@ -1,0 +1,18 @@
+# Apuntes locales para preparar el informe y la defensa.
+.privado/
+
+# Configuración local del editor y herramientas de asistencia.
+.vscode/
+.codex/
+.agents/
+.clangd
+
+# Archivos auxiliares de macOS.
+__MACOSX/
+
+# Credenciales de esta placa y archivos generados al compilar.
+camara_nube/main/config_local.h
+camara_nube/build/
+camara_nube/managed_components/
+camara_nube/sdkconfig.old
+camara_nube/sdkconfig

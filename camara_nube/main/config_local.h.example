@@ -1,0 +1,8 @@
+#pragma once
+
+/* Copiar como config_local.h y completar en el equipo antes de compilar.
+ * config_local.h queda fuera de Git porque contiene las claves. */
+#define WIFI_SSID  "nombre-de-tu-red"
+#define WIFI_CLAVE "clave-de-tu-red"
+#define NUBE_URL   "https://script.google.com/macros/s/PEGA-AQUI-EL-ID/exec"
+#define NUBE_TOKEN "pega-aqui-el-token"
