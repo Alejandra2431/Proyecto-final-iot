@@ -233,6 +233,23 @@ typedef struct {
     char     ultimo[24];        /* para la pantalla: "OK 2.7 S", "ERROR RED" */
 } estado_t;
 
+/* Tiempos de pared: incluyen esperas y las interrupciones de otras tareas.
+ * No son tiempo de CPU; ese dato lo da informe_tareas(). */
+enum {
+    VISOR_ADQUIRIR, VISOR_JPEG_1_8, VISOR_COMPARAR, VISOR_JPEG_PANTALLA,
+    VISOR_BARRA, VISOR_PANTALLA, VISOR_PAUSA, VISOR_ETAPAS
+};
+typedef struct {
+    uint32_t ciclos;
+    uint32_t mostrados;
+    uint32_t sin_cuadro;
+    uint32_t errores_jpeg;
+    uint32_t errores_detector;
+    uint32_t fotos;
+    uint64_t foto_us;
+    uint64_t etapas_us[VISOR_ETAPAS];
+} medida_visor_t;
+
 /* ======================================================================== */
 /*  Objetos del kernel y estado                                              */
 /* ======================================================================== */
@@ -248,6 +265,8 @@ static temperature_sensor_handle_t s_temperatura;
 static movimiento_t s_movimiento;
 
 static estado_t s_estado = { .ultimo = "LISTA" };
+static medida_visor_t s_medida_visor;
+static int64_t s_inicio_medida_visor_us;
 static bool     s_nube_lista;
 
 static uint8_t *s_jpeg;                     /* el cuadro del visor          */
@@ -470,6 +489,21 @@ static void tomar_foto(uint32_t pulsacion_ms, const char *motivo)
 /*  TAREA visor                                                              */
 /* ======================================================================== */
 
+static void registrar_ciclo_visor(const medida_visor_t *medida)
+{
+    /* Un único registro por ciclo, sin imprimir una línea por cuadro. */
+    xSemaphoreTake(s_mutex_estado, portMAX_DELAY);
+    s_medida_visor.ciclos += medida->ciclos;
+    s_medida_visor.mostrados += medida->mostrados;
+    s_medida_visor.sin_cuadro += medida->sin_cuadro;
+    s_medida_visor.errores_jpeg += medida->errores_jpeg;
+    s_medida_visor.errores_detector += medida->errores_detector;
+    for (int i = 0; i < VISOR_ETAPAS; i++) {
+        s_medida_visor.etapas_us[i] += medida->etapas_us[i];
+    }
+    xSemaphoreGive(s_mutex_estado);
+}
+
 static void tarea_visor(void *arg)
 {
     uint32_t pendientes = 0;
@@ -501,6 +535,7 @@ static void tarea_visor(void *arg)
                 ultima_solicitud_us = ahora_us;
                 ESP_LOGI(TAG, "[disparo] %s aceptado a %" PRIi64 " ms",
                          motivo, ahora_us / 1000);
+                const int64_t inicio_foto_us = esp_timer_get_time();
                 tomar_foto(us_a_ms(ahora_us), motivo);
                 /* Durante la foto fija no se comparan cuadros. Al volver,
                  * hacemos otra referencia para no comparar con una escena vieja. */
@@ -510,28 +545,45 @@ static void tarea_visor(void *arg)
                         pdMS_TO_TICKS(FOTO_EN_PANTALLA_MS)) == pdTRUE) {
                     pendientes = avisos & AVISOS_FOTO;
                 }
+                const int64_t foto_us = esp_timer_get_time() - inicio_foto_us;
+                xSemaphoreTake(s_mutex_estado, portMAX_DELAY);
+                s_medida_visor.fotos++;
+                s_medida_visor.foto_us += foto_us;
+                xSemaphoreGive(s_mutex_estado);
                 continue;
             }
         }
 
+        medida_visor_t medida = { .ciclos = 1 };
+        int64_t inicio_etapa_us = esp_timer_get_time();
         camera_fb_t *fb = esp_camera_fb_get();
         if (fb == NULL) {
+            medida.etapas_us[VISOR_ADQUIRIR] = esp_timer_get_time() - inicio_etapa_us;
+            medida.sin_cuadro = 1;
+            inicio_etapa_us = esp_timer_get_time();
             vTaskDelay(pdMS_TO_TICKS(100));
+            medida.etapas_us[VISOR_PAUSA] = esp_timer_get_time() - inicio_etapa_us;
+            registrar_ciclo_visor(&medida);
             continue;
         }
         const size_t largo = fb->len;
         memcpy(s_jpeg, fb->buf, largo);
         esp_camera_fb_return(fb);
+        medida.etapas_us[VISOR_ADQUIRIR] = esp_timer_get_time() - inicio_etapa_us;
 
         imagen_t img;
         if (MOVIMIENTO_ACTIVO) {
+            inicio_etapa_us = esp_timer_get_time();
             const esp_err_t err = imagen_decodificar_movimiento(s_jpeg, largo, &img);
+            medida.etapas_us[VISOR_JPEG_1_8] = esp_timer_get_time() - inicio_etapa_us;
             if (err == ESP_OK && img.ancho == MOVIMIENTO_ANCHO &&
                     img.alto == MOVIMIENTO_ALTO) {
                 movimiento_resultado_t resultado;
+                inicio_etapa_us = esp_timer_get_time();
                 const bool cambio = movimiento_comparar(&s_movimiento, img.pixeles,
                     MOVIMIENTO_DIFERENCIA_MINIMA, MOVIMIENTO_PORCENTAJE_MINIMO,
                     &resultado);
+                medida.etapas_us[VISOR_COMPARAR] = esp_timer_get_time() - inicio_etapa_us;
                 if (cuadros_iniciales > 0) {
                     cuadros_iniciales--;
                 } else if (cambio && (!hubo_solicitud ||
@@ -545,6 +597,7 @@ static void tarea_visor(void *arg)
                 }
                 error_movimiento_avisado = false;
             } else {
+                medida.errores_detector = 1;
                 s_movimiento.tiene_anterior = false;
                 cuadros_iniciales = MOVIMIENTO_CUADROS_INICIALES;
                 if (!error_movimiento_avisado) {
@@ -553,13 +606,26 @@ static void tarea_visor(void *arg)
                 }
             }
         }
-        if (imagen_decodificar(s_jpeg, largo, &img) == ESP_OK) {
+        inicio_etapa_us = esp_timer_get_time();
+        const esp_err_t err_img = imagen_decodificar(s_jpeg, largo, &img);
+        medida.etapas_us[VISOR_JPEG_PANTALLA] = esp_timer_get_time() - inicio_etapa_us;
+        if (err_img == ESP_OK) {
+            inicio_etapa_us = esp_timer_get_time();
             char texto[40];
             texto_de_estado(texto, sizeof(texto));
             barra_de_estado(&img, texto);
+            medida.etapas_us[VISOR_BARRA] = esp_timer_get_time() - inicio_etapa_us;
+            inicio_etapa_us = esp_timer_get_time();
             imagen_mostrar(&img);
+            medida.etapas_us[VISOR_PANTALLA] = esp_timer_get_time() - inicio_etapa_us;
+            medida.mostrados = 1;
+        } else {
+            medida.errores_jpeg = 1;
         }
+        inicio_etapa_us = esp_timer_get_time();
         vTaskDelay(pdMS_TO_TICKS(PAUSA_VISOR_MS));
+        medida.etapas_us[VISOR_PAUSA] = esp_timer_get_time() - inicio_etapa_us;
+        registrar_ciclo_visor(&medida);
     }
 }
 
@@ -695,6 +761,37 @@ static void tarea_subida(void *arg)
 /*  TEMPORIZADOR SOFTWARE:  informe                                          */
 /* ======================================================================== */
 
+static void informe_visor(void)
+{
+    xSemaphoreTake(s_mutex_estado, portMAX_DELAY);
+    const int64_t ahora_us = esp_timer_get_time();
+    const int64_t intervalo_us = ahora_us - s_inicio_medida_visor_us;
+    const medida_visor_t medida = s_medida_visor;
+    s_medida_visor = (medida_visor_t){0};
+    s_inicio_medida_visor_us = ahora_us;
+    xSemaphoreGive(s_mutex_estado);
+    if (intervalo_us <= 0) return;
+    ESP_LOGI(TAG, "[visor] detector %s; ventana %.3f s; cuadros %" PRIu32 "; FPS %.2f",
+             MOVIMIENTO_ACTIVO ? "SI" : "NO", intervalo_us / 1000000.0,
+             medida.mostrados, medida.mostrados * 1000000.0 / intervalo_us);
+    ESP_LOGI(TAG, "[visor] ciclos %" PRIu32 "; sin cuadro %" PRIu32
+                  "; errores JPEG %" PRIu32 "; errores detector %" PRIu32,
+             medida.ciclos, medida.sin_cuadro, medida.errores_jpeg, medida.errores_detector);
+    if (medida.ciclos > 0) {
+        const char *nombres[VISOR_ETAPAS] = {
+            "adquirir/copiar", "JPEG 1/8", "comparar", "JPEG pantalla",
+            "barra", "pantalla", "pausa"
+        };
+        for (int i = 0; i < VISOR_ETAPAS; i++) {
+            ESP_LOGI(TAG, "[visor] %-15s media %.3f ms/ciclo", nombres[i],
+                     medida.etapas_us[i] / (1000.0 * medida.ciclos));
+        }
+    }
+    ESP_LOGI(TAG, "[visor] pedidos de foto atendidos %" PRIu32
+                  "; captura y espera de foto fija %.3f s (incluidos en ventana FPS)",
+             medida.fotos, medida.foto_us / 1000000.0);
+}
+
 static void informe(TimerHandle_t timer)
 {
     xSemaphoreTake(s_mutex_estado, portMAX_DELAY);
@@ -706,6 +803,7 @@ static void informe(TimerHandle_t timer)
 
     ESP_LOGI(TAG, "--- Informe de %s (cada %d s) -------------------------",
              s_id, INFORME_PERIODO_MS / 1000);
+    informe_visor();
     informe_tareas(TAG);
     informe_memoria(TAG);
     avisos_mqtt_informe();
@@ -836,6 +934,7 @@ void app_main(void)
     ESP_ERROR_CHECK(avisos_mqtt_iniciar(&mqtt));
 
     /* --- Las tareas -------------------------------------------------------- */
+    s_inicio_medida_visor_us = esp_timer_get_time();
     xTaskCreate(tarea_visor, "visor", PILA_VISOR, NULL, PRIO_VISOR, &s_tarea_visor);
     ESP_ERROR_CHECK(s_tarea_visor != NULL ? ESP_OK : ESP_ERR_NO_MEM);
     if (s_nube_lista) {
