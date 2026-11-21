@@ -34,6 +34,10 @@ esp_err_t imagen_iniciar(void);
  * 1/8; ESP_FAIL si los datos no son un JPEG que el decodificador entienda. */
 esp_err_t imagen_decodificar(const uint8_t *jpeg, size_t largo, imagen_t *img);
 
+/* VGA a 1/8: 80x60 para comparar movimiento. Reutiliza el mismo buffer;
+ * llamar antes de decodificar la imagen que se mostrará en pantalla. */
+esp_err_t imagen_decodificar_movimiento(const uint8_t *jpeg, size_t largo, imagen_t *img);
+
 /* Manda la imagen a la pantalla, centrada. Si cambió de tamaño desde la vez
  * anterior, borra antes la pantalla para que no queden restos en el marco. */
 void imagen_mostrar(const imagen_t *img);

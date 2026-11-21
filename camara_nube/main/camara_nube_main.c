@@ -45,6 +45,7 @@
 #include "esp_wifi.h"
 #include "camara.h"
 #include "imagen.h"
+#include "movimiento.h"
 #include "informe.h"
 #include "nube.h"
 #include "pantalla.h"
@@ -89,6 +90,18 @@
 
 /* Evita fotos seguidas, aunque las pidan disparadores distintos. */
 #define FOTO_TIEMPO_MUERTO_S 5
+
+/* Para medir el visor sin detector, poner MOVIMIENTO_ACTIVO en 0.
+ * La cámara debe quedar fija. Los umbrales se ajustan con pruebas reales. */
+#define MOVIMIENTO_ACTIVO             1
+#define MOVIMIENTO_DIFERENCIA_MINIMA  20  /* brillo de 0 a 255 */
+#define MOVIMIENTO_PORCENTAJE_MINIMO   8  /* porcentaje de píxeles cambiados */
+#define MOVIMIENTO_CUADROS_INICIALES   5  /* referencia tras arranque o foto */
+
+#if MOVIMIENTO_DIFERENCIA_MINIMA < 1 || MOVIMIENTO_DIFERENCIA_MINIMA > 255 || \
+    MOVIMIENTO_PORCENTAJE_MINIMO < 1 || MOVIMIENTO_PORCENTAJE_MINIMO > 100
+#error "Revisar los umbrales de movimiento"
+#endif
 
 #if FOTO_CADA_S < 0 || FOTO_TIEMPO_MUERTO_S < 0
 #error "Los tiempos de las fotos no pueden ser negativos"
@@ -165,7 +178,8 @@
 
 #define AVISO_BOTON         (1u << 0)
 #define AVISO_PERIODICA     (1u << 1)
-#define AVISOS_FOTO         (AVISO_BOTON | AVISO_PERIODICA)
+#define AVISO_MOVIMIENTO    (1u << 2)
+#define AVISOS_FOTO         (AVISO_BOTON | AVISO_PERIODICA | AVISO_MOVIMIENTO)
 
 #define NEGRO               0x0000
 #define BLANCO              0xFFFF
@@ -220,6 +234,7 @@ static TaskHandle_t       s_tarea_visor;
 static TimerHandle_t      s_timer_informe;
 static TimerHandle_t      s_timer_foto;
 static temperature_sensor_handle_t s_temperatura;
+static movimiento_t s_movimiento;
 
 static estado_t s_estado = { .ultimo = "LISTA" };
 static bool     s_nube_lista;
@@ -440,6 +455,8 @@ static void tarea_visor(void *arg)
     uint32_t pendientes = 0;
     int64_t ultima_solicitud_us = 0;
     bool hubo_solicitud = false;
+    unsigned cuadros_iniciales = MOVIMIENTO_CUADROS_INICIALES;
+    bool error_movimiento_avisado = false;
 
     while (1) {
         /* Como en el ejemplo 1: «avisos» solo vale si se devolvió pdTRUE. */
@@ -448,9 +465,10 @@ static void tarea_visor(void *arg)
             pendientes |= avisos & AVISOS_FOTO;
         }
         if (pendientes != 0) {
-            /* Si ambos avisos llegan juntos, BOOT tiene prioridad.
+            /* Si hay varios avisos: BOOT, periódica y luego movimiento.
              * Solo el visor decide: no hay dos tareas tomando fotos a la vez. */
-            const char *motivo = (pendientes & AVISO_BOTON) ? "boton" : "periodica";
+            const char *motivo = (pendientes & AVISO_BOTON) ? "boton" :
+                (pendientes & AVISO_PERIODICA) ? "periodica" : "movimiento";
             const int64_t ahora_us = esp_timer_get_time();
             pendientes = 0;
             if (hubo_solicitud && ahora_us - ultima_solicitud_us <
@@ -464,6 +482,10 @@ static void tarea_visor(void *arg)
                 ESP_LOGI(TAG, "[disparo] %s aceptado a %" PRIi64 " ms",
                          motivo, ahora_us / 1000);
                 tomar_foto(us_a_ms(ahora_us), motivo);
+                /* Durante la foto fija no se comparan cuadros. Al volver,
+                 * hacemos otra referencia para no comparar con una escena vieja. */
+                s_movimiento.tiene_anterior = false;
+                cuadros_iniciales = MOVIMIENTO_CUADROS_INICIALES;
                 if (xTaskNotifyWait(0, UINT32_MAX, &avisos,
                         pdMS_TO_TICKS(FOTO_EN_PANTALLA_MS)) == pdTRUE) {
                     pendientes = avisos & AVISOS_FOTO;
@@ -482,6 +504,35 @@ static void tarea_visor(void *arg)
         esp_camera_fb_return(fb);
 
         imagen_t img;
+        if (MOVIMIENTO_ACTIVO) {
+            const esp_err_t err = imagen_decodificar_movimiento(s_jpeg, largo, &img);
+            if (err == ESP_OK && img.ancho == MOVIMIENTO_ANCHO &&
+                    img.alto == MOVIMIENTO_ALTO) {
+                movimiento_resultado_t resultado;
+                const bool cambio = movimiento_comparar(&s_movimiento, img.pixeles,
+                    MOVIMIENTO_DIFERENCIA_MINIMA, MOVIMIENTO_PORCENTAJE_MINIMO,
+                    &resultado);
+                if (cuadros_iniciales > 0) {
+                    cuadros_iniciales--;
+                } else if (cambio && (!hubo_solicitud ||
+                        esp_timer_get_time() - ultima_solicitud_us >=
+                            (int64_t)FOTO_TIEMPO_MUERTO_S * 1000000)) {
+                    ESP_LOGI(TAG, "[movimiento] %u/%u pixeles; diferencia media %u.%02u",
+                             resultado.cambiados, MOVIMIENTO_PIXELES,
+                             resultado.diferencia_media_x100 / 100,
+                             resultado.diferencia_media_x100 % 100);
+                    pendientes |= AVISO_MOVIMIENTO;
+                }
+                error_movimiento_avisado = false;
+            } else {
+                s_movimiento.tiene_anterior = false;
+                cuadros_iniciales = MOVIMIENTO_CUADROS_INICIALES;
+                if (!error_movimiento_avisado) {
+                    ESP_LOGW(TAG, "no se pudo obtener el cuadro de movimiento 80x60");
+                    error_movimiento_avisado = true;
+                }
+            }
+        }
         if (imagen_decodificar(s_jpeg, largo, &img) == ESP_OK) {
             char texto[40];
             texto_de_estado(texto, sizeof(texto));
@@ -692,6 +743,15 @@ void app_main(void)
     s_jpeg = heap_caps_malloc(camara_tamano_buffer(), MALLOC_CAP_SPIRAM);
     ESP_ERROR_CHECK(s_jpeg != NULL ? ESP_OK : ESP_ERR_NO_MEM);
     ESP_ERROR_CHECK(imagen_iniciar());
+    if (MOVIMIENTO_ACTIVO) {
+        if (FOTO_TAMANO != FRAMESIZE_VGA) {
+            ESP_LOGE(TAG, "el detector 80x60 requiere FOTO_TAMANO FRAMESIZE_VGA");
+            ESP_ERROR_CHECK(ESP_ERR_INVALID_SIZE);
+        }
+        s_movimiento.anterior = heap_caps_malloc(MOVIMIENTO_PIXELES,
+                                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        ESP_ERROR_CHECK(s_movimiento.anterior != NULL ? ESP_OK : ESP_ERR_NO_MEM);
+    }
 
     /* Es la temperatura del chip, no la del ambiente. Si falla el sensor,
      * seguimos tomando fotos y enviamos null en lugar de inventar un cero. */

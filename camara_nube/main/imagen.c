@@ -103,6 +103,42 @@ esp_err_t imagen_decodificar(const uint8_t *jpeg, size_t largo, imagen_t *img)
     return ESP_OK;
 }
 
+esp_err_t imagen_decodificar_movimiento(const uint8_t *jpeg, size_t largo, imagen_t *img)
+{
+    if (s_pixeles == NULL || jpeg == NULL || largo == 0 || img == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    esp_jpeg_image_cfg_t cfg = {
+        .indata = (uint8_t *)jpeg,
+        .indata_size = largo,
+        .outbuf = (uint8_t *)s_pixeles,
+        .outbuf_size = PIXELES_PANTALLA * sizeof(uint16_t),
+        .out_format = JPEG_IMAGE_FORMAT_RGB565,
+        .out_scale = JPEG_IMAGE_SCALE_1_8,
+        .flags.swap_color_bytes = 1,
+        .advanced.working_buffer = s_trabajo,
+        .advanced.working_buffer_size = sizeof(s_trabajo),
+    };
+    esp_jpeg_image_output_t info;
+    if (esp_jpeg_get_image_info(&cfg, &info) != ESP_OK) {
+        return ESP_FAIL;
+    }
+    if (info.width != 640 || info.height != 480) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    /* A 1/8 TJpgDec usa el componente DC, la media de cada bloque JPEG.
+     * No reducimos una imagen grande después de haberla decodificado. */
+    esp_jpeg_image_output_t salida;
+    if (esp_jpeg_decode(&cfg, &salida) != ESP_OK) {
+        return ESP_FAIL;
+    }
+    img->pixeles = s_pixeles;
+    img->ancho = salida.width;
+    img->alto = salida.height;
+    img->divisor = 8;
+    return ESP_OK;
+}
+
 void imagen_mostrar(const imagen_t *img)
 {
     if (img == NULL || img->pixeles == NULL) {
